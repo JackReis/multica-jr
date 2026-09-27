@@ -97,10 +97,10 @@ The runtime brief (`runtime_config_sections.go`, the only brief after MUL-4297) 
 
 ## Fleet trust guidelines
 
-Vault and skill source of truth is Fleet information unification (Multica AEGI-164 / AEGI-186). The fleet map is short: Multica assigns, Open Engine is the protocol, Kata closes, Hermes executes, Ringer holds receipts, the prover proves, Vault holds narrative, and Dune holds constraints.
+Vault and skill source of truth is the `fleet-information-unification` skill and vault path `Architecture/fleet/FLEET-INFORMATION-UNIFICATION-DOCTRINE-20260927.md` (Multica AEGI-164 / AEGI-186). The fleet map is short: Multica assigns, Open Engine is the protocol, Kata closes, Hermes executes, Ringer holds receipts, the prover proves, Vault holds narrative, and Dune holds constraints.
 
-1. Prefer Cursor cloud for harvest, draft, and review.
-2. Rotate review seats: Claude Code → ChatGPT/Codex → Gemini (Antigravity) → Kimi.
+1. Prefer Cursor cloud for draft/review.
+2. Trust rotation: Claude Code → ChatGPT/Codex → Gemini (Antigravity) → Kimi.
 3. Soft ship: draft → review → Multica stamp → apply (profile-mutate way-of-work).
 4. CoS may soft-ship after a Multica stamp. Jack-gated: `--replace`, secrets, spend, and irreversible writes.
 
