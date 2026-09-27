@@ -131,5 +131,26 @@
     "Do not store owners, statuses, or claims in Hermes memories or Codex memories.",
     "Pass --no-start only when the write records work already underway.",
     "After a continuity notice, re-derive from the issue."
-  ]
+  ],
+  "fleet_information_unification": {
+    "note": "Vault and skill source of truth is Fleet information unification (AEGI-164 / AEGI-186). Skill: fleet-information-unification. Vault path: Architecture/fleet/FLEET-INFORMATION-UNIFICATION-DOCTRINE-20260927.md.",
+    "skill": "fleet-information-unification",
+    "vault_path": "Architecture/fleet/FLEET-INFORMATION-UNIFICATION-DOCTRINE-20260927.md",
+    "source_of_truth": [
+      "Multica assigns",
+      "Open Engine protocol",
+      "Kata closes",
+      "Hermes executes",
+      "Ringer receipts",
+      "prover proves",
+      "Vault narrative",
+      "Dune constraints"
+    ],
+    "trust_guidelines": [
+      "Prefer Cursor cloud for draft/review.",
+      "Trust rotation: Claude Code → ChatGPT/Codex → Gemini (Antigravity) → Kimi.",
+      "Soft ship: draft → review → Multica stamp → apply (profile-mutate way-of-work).",
+      "CoS may soft-ship after stamp; Jack-gated: --replace, secrets, spend, irreversible."
+    ]
+  }
 }
