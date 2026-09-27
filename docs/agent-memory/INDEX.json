@@ -1,0 +1,135 @@
+{
+  "schema": "multica.agent-memory.harvest.v1",
+  "date": "2026-09-27",
+  "repo": "JackReis/multica-jr",
+  "base_commit": "3551e72e76d2c276e550b668303646d1280fb1e2",
+  "audience": "Jack / CoS",
+  "doctrine": "Multica is the assignment source of truth. Agents trust the board and the claim model. Provider memory is a cache.",
+  "docs": {
+    "harvest": "docs/agent-memory/HARVEST.md",
+    "branches": "docs/agent-memory/BRANCHES.md",
+    "simplifications": "docs/agent-memory/SIMPLIFICATIONS.md"
+  },
+  "glossary": {
+    "issue": "Board card. Product noun. Carries assignee, status, comments, properties, parent, stage.",
+    "run": "One execution. API and DB name is task (agent_task_queue).",
+    "ownership_claim": "Assignee write recorded on the issue. Use --no-start when a run is already underway.",
+    "queue_claim": "ClaimAgentTask: a daemon takes the next queued run under a prepare lease."
+  },
+  "records": [
+    {
+      "id": "board",
+      "authority": "assignment",
+      "fields": ["assignee_type", "assignee_id", "status", "parent", "stage", "comments", "properties", "pull_request_links"],
+      "predicate": "server/internal/service/issue_trigger.go WillEnqueueRun",
+      "read": ["multica issue get", "multica issue comment list --roots-only --summary", "multica issue pull-requests"]
+    },
+    {
+      "id": "queue",
+      "authority": "execution",
+      "sql": "server/pkg/db/queries/agent.sql ClaimAgentTask",
+      "serialization": "one dispatched/running/waiting_local_directory run per (issue, agent); chat_session_id for chat; quick-create shape for tasks with no source FK",
+      "pending_slot": "idx_one_pending_task_per_issue_agent_v2",
+      "prepare_lease_seconds": 45,
+      "claim_recovery_seconds": 90,
+      "read": ["multica issue runs --active", "multica issue runs --siblings"]
+    }
+  ],
+  "planes": [
+    {
+      "id": "issue_board",
+      "assignment_authority": true,
+      "scope": "workspace issue",
+      "source": "docs/agent-memory/HARVEST.md"
+    },
+    {
+      "id": "run_queue",
+      "assignment_authority": true,
+      "scope": "(issue, agent) | chat session | quick-create",
+      "source": "server/pkg/db/queries/agent.sql"
+    },
+    {
+      "id": "issue_or_chat_transcript",
+      "assignment_authority": false,
+      "role": "authoritative conversation after a missed resume",
+      "source": "server/internal/daemon/execenv/runtime_config_sections.go SessionContinuityNoticeIssue"
+    },
+    {
+      "id": "codex_session",
+      "assignment_authority": false,
+      "path": "~/.codex/multica-sessions/<profile-hash>/<agent>/<issue|chat_id>",
+      "source": "server/internal/daemon/execenv/codex_home.go"
+    },
+    {
+      "id": "hermes_session",
+      "assignment_authority": false,
+      "path": "<profile>/hermes-sessions/<agent>/<hermes-profile>/<conversation>/state.db",
+      "ttl_env": "MULTICA_GC_HERMES_SESSION_TTL",
+      "ttl_default": "336h",
+      "source": "server/internal/daemon/execenv/hermes_sessions.go"
+    },
+    {
+      "id": "hermes_memories",
+      "assignment_authority": false,
+      "path": "<profile>/hermes-state/<agent>/<hermes-profile>/",
+      "ttl_env": "MULTICA_GC_HERMES_MEMORY_TTL",
+      "ttl_default": "2160h",
+      "concurrency": "last-writer-wins across the agent's issues",
+      "source": "server/internal/daemon/execenv/hermes_memory.go"
+    },
+    {
+      "id": "codex_native_memories",
+      "assignment_authority": false,
+      "default": "disabled",
+      "opt_in_env": "MULTICA_CODEX_MEMORY",
+      "source": "server/internal/daemon/execenv/codex_memory.go"
+    },
+    {
+      "id": "host_hermes_home",
+      "assignment_authority": false,
+      "when": "skill-less Hermes agent with no overlay",
+      "open_issue": "MUL-5969",
+      "source": "server/internal/daemon/execenv/hermes_memory.go"
+    },
+    {
+      "id": "issue_metadata_kv",
+      "assignment_authority": false,
+      "status": "retired from brief and platform skill",
+      "open_issue": "MUL-6966",
+      "source": "server/internal/service/builtin_skills/multica-platform/references/issues.md"
+    }
+  ],
+  "branches": [
+    {"id": "B1", "title": "Board versus provider memory", "legal": "board"},
+    {"id": "B2", "title": "Skill overlay versus host Hermes home", "legal": "overlay", "open_issue": "MUL-5969"},
+    {"id": "B3", "title": "Long-term notes versus transcript", "legal": "neither is an assignment expiry"},
+    {"id": "B4", "title": "Authoritative conversation after a missed resume", "legal": "issue comments or chat history"},
+    {"id": "B5", "title": "How a run starts", "legal": "WillEnqueueRun or the comment trigger"},
+    {"id": "B6", "title": "Ownership write versus fresh handoff", "legal": "--no-start records; default assign starts"},
+    {"id": "B7", "title": "Advisory sibling read versus queue serialization", "legal": "queue serializes; issue runs is advisory"},
+    {"id": "B8", "title": "Status fact versus run lifecycle", "legal": "status is the issue fact"},
+    {"id": "B9", "title": "Scratchpad retired", "legal": "properties and comments", "open_issue": "MUL-6966"},
+    {"id": "B10", "title": "Env root identity versus the proposal", "legal": "root.json wins the path; the issue wins the assignment"},
+    {"id": "B11", "title": "Empty-claim cache", "legal": "invalidated on enqueue; not a board"}
+  ],
+  "simplifications": [
+    {"id": "S1", "title": "One sentence on every issue turn", "state": "already in the numbered brief"},
+    {"id": "S2", "title": "Assignment facts have one home", "state": "operating rule"},
+    {"id": "S3", "title": "Two verbs: hand off versus record", "state": "already in --no-start and WillEnqueueRun"},
+    {"id": "S4", "title": "Keep Codex memories off", "state": "daemon default"},
+    {"id": "S5", "title": "Hermes notes are not a board", "state": "open", "open_issue": "MUL-5969"},
+    {"id": "S6", "title": "Session loss is a re-read", "state": "SessionContinuityNotice*"},
+    {"id": "S7", "title": "One pending run, looked up rather than remembered", "state": "queue unique slot"},
+    {"id": "S8", "title": "Do not bring the scratchpad back", "state": "MUL-6966"},
+    {"id": "S9", "title": "Quick-create and run-only autopilot stay outside the board until an issue exists", "state": "already guarded"},
+    {"id": "S10", "title": "Prompt surface stays single", "state": "brief vs skill vs identity"}
+  ],
+  "cos_rule": [
+    "Route by writing an issue: assignee, status, parent, stage, and a body a fresh assignee can execute.",
+    "Read assignment from the issue. Read in-flight runs from issue runs. Read execution rights from the queue.",
+    "Write decisions into comments and properties.",
+    "Do not store owners, statuses, or claims in Hermes memories or Codex memories.",
+    "Pass --no-start only when the write records work already underway.",
+    "After a continuity notice, re-derive from the issue."
+  ]
+}
