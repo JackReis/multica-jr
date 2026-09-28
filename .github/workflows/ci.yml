@@ -467,14 +467,44 @@ jobs:
         if: ${{ needs.changes.outputs.frontend == 'true' }}
         run: pnpm exec turbo test --filter='@multica/views' -- --shard=${{ matrix.index }}/${{ matrix.total }}
 
+  # Dune import graph (AEGI-178). Not path-filtered: a skipped or empty
+  # graph would be fail-open. The frontend aggregate below requires this
+  # job's success, so the existing required "frontend" check fails closed
+  # when the ban cannot be proved. Four edges: unprivileged→privileged,
+  # shortcut IPC, secret readers in UI, parallel board clients.
+  dune-import-graph:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Prove the import ban fails closed, then run it
+        run: |
+          node --test --test-concurrency=1 scripts/dune-import-bans.test.mjs
+          node scripts/dune-import-bans.mjs
+
   # Aggregate gate. `frontend` is the status-check name the repository's
   # branch rules refer to, so it has to survive the split above: this job
   # keeps reporting under that name and simply fails when any worker fails.
   # It also inherits the old contract that the check goes green (rather than
   # staying pending) on PRs the path filter excluded — all workers succeed
   # trivially in that case because every step is gated off.
+  # dune-import-graph is the exception: it always runs, and a non-success
+  # result fails this check.
   frontend:
-    needs: [frontend-build, frontend-test, frontend-views-test]
+    needs: [frontend-build, frontend-test, frontend-views-test, dune-import-graph]
     # `!cancelled()` rather than `always()`: a run superseded by a newer push
     # is cancelled by the concurrency group above, and there is no reason to
     # spend a runner reporting a verdict nobody will read.
@@ -486,11 +516,13 @@ jobs:
           BUILD_RESULT: ${{ needs.frontend-build.result }}
           TEST_RESULT: ${{ needs.frontend-test.result }}
           VIEWS_TEST_RESULT: ${{ needs.frontend-views-test.result }}
+          DUNE_RESULT: ${{ needs.dune-import-graph.result }}
         run: |
           echo "frontend-build: $BUILD_RESULT"
           echo "frontend-test:  $TEST_RESULT"
           echo "frontend-views-test: $VIEWS_TEST_RESULT"
-          if [ "$BUILD_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ] || [ "$VIEWS_TEST_RESULT" != "success" ]; then
+          echo "dune-import-graph: $DUNE_RESULT"
+          if [ "$BUILD_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ] || [ "$VIEWS_TEST_RESULT" != "success" ] || [ "$DUNE_RESULT" != "success" ]; then
             echo "::error::frontend validation failed"
             exit 1
           fi

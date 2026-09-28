@@ -1,0 +1,5 @@
+{
+  "schema": "multica.dune-import-exception.v1",
+  "note": "Empty ledger. A live banned edge fails CI until an entry here names that exact edge, file, and specifier, with a reason and a stamp. Unused entries also fail.",
+  "exceptions": []
+}
