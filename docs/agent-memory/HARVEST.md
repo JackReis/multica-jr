@@ -106,4 +106,8 @@ Vault and skill source of truth is the `fleet-information-unification` skill and
 
 These pointers sit beside the assignment doctrine. They do not change the board, the queue, or any schema. The same strings are on [`INDEX.json`](./INDEX.json) under `fleet_information_unification`.
 
+## Dune import bans
+
+Vault and skill source of truth for the constraint plane is `dune-electron-doctrine` and `Architecture/fleet/DUNE-ELECTRON-VAULT-DOCTRINE-20260927.md` §3 (Multica **AEGI-178**, card `01a0e545-edc9-793d-be5f-2b1258ad9449`, baton `01a0e5b2-e7d3-7dda-9c88-0c348a62797a`). CI job `dune-import-graph` fails closed on four edges: unprivileged to privileged, shortcut IPC, secret readers in UI, and a parallel board client in Electron or UI. The sanctioned assignment client remains `packages/core/api/client.ts`. Details: [`DUNE-IMPORT-BANS.md`](./DUNE-IMPORT-BANS.md).
+
 Machine index: [`INDEX.json`](./INDEX.json). Forks: [`BRANCHES.md`](./BRANCHES.md). Collapses: [`SIMPLIFICATIONS.md`](./SIMPLIFICATIONS.md).

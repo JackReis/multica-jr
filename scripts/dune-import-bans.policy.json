@@ -1,0 +1,91 @@
+{
+  "schema": "multica.dune-import-policy.v1",
+  "doctrine": {
+    "skill": "dune-electron-doctrine",
+    "vault": "Architecture/fleet/DUNE-ELECTRON-VAULT-DOCTRINE-20260927.md",
+    "section": "3",
+    "card": "AEGI-178",
+    "card_id": "01a0e545-edc9-793d-be5f-2b1258ad9449",
+    "baton": "01a0e5b2-e7d3-7dda-9c88-0c348a62797a"
+  },
+  "edges": [
+    "unprivileged-to-privileged",
+    "shortcut-ipc",
+    "secret-reader-in-ui",
+    "parallel-board-client"
+  ],
+  "unprivileged_prefixes": [
+    "apps/web/",
+    "apps/docs/",
+    "apps/desktop/src/renderer/",
+    "apps/desktop/src/shared/",
+    "packages/ui/",
+    "packages/views/",
+    "packages/core/"
+  ],
+  "privileged_prefixes": [
+    "apps/desktop/src/main/",
+    "apps/desktop/src/preload/",
+    "server/"
+  ],
+  "electron_zones": {
+    "main": "apps/desktop/src/main/",
+    "preload": "apps/desktop/src/preload/",
+    "renderer": "apps/desktop/src/renderer/"
+  },
+  "secret_reader_files": [
+    "apps/desktop/src/main/daemon-manager.ts",
+    "apps/desktop/src/main/daemon-profile.ts"
+  ],
+  "secret_reader_specifiers": [
+    "keytar",
+    "@napi-rs/keyring",
+    "electron-safe-storage"
+  ],
+  "secret_reader_named_imports": {
+    "electron": ["safeStorage"]
+  },
+  "shortcut_ipc_specifiers": [
+    "electron",
+    "electron/main",
+    "electron/renderer",
+    "electron/common",
+    "@electron-toolkit/preload",
+    "@electron-toolkit/utils"
+  ],
+  "shortcut_node_from_prefixes": [
+    "apps/desktop/src/renderer/",
+    "apps/desktop/src/shared/"
+  ],
+  "board_scan_prefixes": [
+    "apps/desktop/",
+    "apps/web/",
+    "packages/ui/",
+    "packages/views/"
+  ],
+  "sanctioned_board_client": "packages/core/api/client.ts",
+  "board_path_marker": "/api/issues",
+  "required_directories": [
+    "apps/desktop/src/main",
+    "apps/desktop/src/preload",
+    "apps/desktop/src/renderer",
+    "apps/desktop/src/shared",
+    "apps/web",
+    "packages/core",
+    "packages/ui",
+    "packages/views"
+  ],
+  "scan_directories": [
+    "apps/desktop/src",
+    "apps/web",
+    "apps/docs",
+    "packages/core",
+    "packages/ui",
+    "packages/views"
+  ],
+  "alias_roots": [
+    { "importer_prefix": "apps/desktop/", "target": "apps/desktop/src/renderer/src" },
+    { "importer_prefix": "apps/web/", "target": "apps/web" },
+    { "importer_prefix": "apps/docs/", "target": "apps/docs" }
+  ]
+}

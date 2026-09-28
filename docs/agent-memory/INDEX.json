@@ -8,7 +8,8 @@
   "docs": {
     "harvest": "docs/agent-memory/HARVEST.md",
     "branches": "docs/agent-memory/BRANCHES.md",
-    "simplifications": "docs/agent-memory/SIMPLIFICATIONS.md"
+    "simplifications": "docs/agent-memory/SIMPLIFICATIONS.md",
+    "dune_import_bans": "docs/agent-memory/DUNE-IMPORT-BANS.md"
   },
   "glossary": {
     "issue": "Board card. Product noun. Carries assignee, status, comments, properties, parent, stage.",
@@ -152,5 +153,26 @@
       "Soft ship: draft → review → Multica stamp → apply (profile-mutate way-of-work).",
       "CoS may soft-ship after stamp; Jack-gated: --replace, secrets, spend, irreversible."
     ]
+  },
+  "dune_import_bans": {
+    "note": "FAIL-closed import graph for Dune edges on multica-jr (AEGI-178). Skill: dune-electron-doctrine. Vault: Architecture/fleet/DUNE-ELECTRON-VAULT-DOCTRINE-20260927.md §3. Soft-spare until a Multica tip/SHA stamp.",
+    "skill": "dune-electron-doctrine",
+    "vault_path": "Architecture/fleet/DUNE-ELECTRON-VAULT-DOCTRINE-20260927.md",
+    "section": "3",
+    "card": "AEGI-178",
+    "card_id": "01a0e545-edc9-793d-be5f-2b1258ad9449",
+    "baton": "01a0e5b2-e7d3-7dda-9c88-0c348a62797a",
+    "gate": "scripts/dune-import-bans.mjs",
+    "policy": "scripts/dune-import-bans.policy.json",
+    "exceptions": "scripts/dune-import-bans.exceptions.json",
+    "ci_job": "dune-import-graph",
+    "source": "docs/agent-memory/DUNE-IMPORT-BANS.md",
+    "edges": [
+      "unprivileged-to-privileged",
+      "shortcut-ipc",
+      "secret-reader-in-ui",
+      "parallel-board-client"
+    ],
+    "sanctioned_board_client": "packages/core/api/client.ts"
   }
 }
