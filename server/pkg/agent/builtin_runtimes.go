@@ -27,6 +27,19 @@ type BuiltinRuntime struct {
 	// (executable, label) to it.
 	ProtocolFamily string
 
+	// SessionDialect selects which session command-line contract the protocol
+	// family's backend speaks for this runtime. Empty means the family's own
+	// dialect — the behaviour every existing runtime identity gets, so adding
+	// the field changes nothing for them.
+	//
+	// It exists because "speaks the same wire protocol" and "takes the same
+	// session flags" are different claims. Prime Agent streams the pi JSON
+	// event protocol but has no `--session` flag, so sharing the family's
+	// backend without separating the two makes it exit before its first event.
+	// An unrecognised value fails NewRuntime closed rather than silently
+	// launching under the family's flags.
+	SessionDialect string
+
 	// DefaultCommand is the bare CLI name the probe looks up on PATH
 	// when MULTICA_<ID>_PATH is not set (e.g. "omp").
 	DefaultCommand string
@@ -98,6 +111,33 @@ var BuiltinRuntimes = []BuiltinRuntime{
 		ProviderLabel:     "omp",
 		ModelDiscovery:    discoverOmpModels,
 	},
+	{
+		// Prime Agent (PrimeIntellect-ai/prime-agent) speaks the pi JSON
+		// event protocol on stdout and takes its prompt on piped stdin, but
+		// its session command line is NOT pi's: v0.10.0 has no `--session`
+		// flag at all (crates/pa-cli/src/args.rs), so the family's default
+		// dialect makes it exit 1 with `Error: Unknown option: --session`
+		// before any event. SessionDialect routes it to the prime dialect,
+		// which selects a session with `--session-dir` + `--resume`.
+		//
+		// ModelDiscovery is deliberately nil: v0.10.0 removed `--list-models`
+		// (it answers with "use \"prime-agent model list\"" and exits 1), and
+		// the replacement command's output shape has not been verified here.
+		// A nil strategy degrades to manual model entry rather than running a
+		// discovery command that is known not to work.
+		ID:                "prime",
+		ProtocolFamily:    "pi",
+		SessionDialect:    SessionDialectPrime,
+		DefaultCommand:    "prime-agent",
+		EnvPrefix:         "MULTICA_PRIME",
+		DisplayName:       "Prime Agent",
+		SkillsDir:         ".prime/skills",
+		UserSkillsDir:     ".prime/agent/skills",
+		LaunchHeader:      "prime-agent (json mode)",
+		DefaultExecutable: "prime-agent",
+		ProviderLabel:     "prime-agent",
+		ModelDiscovery:    nil,
+	},
 }
 
 // BuiltinRuntimeByID returns the descriptor for the given runtime identity,
@@ -134,15 +174,26 @@ func BuiltinRuntimeCommands() []string {
 // identity at all: NewRuntime fails closed rather than handing back a backend
 // with the overrides silently dropped.
 type backendOverrideApplicator interface {
-	applyBuiltinRuntimeOverrides(desc BuiltinRuntime)
+	applyBuiltinRuntimeOverrides(desc BuiltinRuntime) error
 }
 
 // piBackend already implements this via its defaultExecutable and
 // providerLabel fields. The method is defined here (not in pi.go) to keep
 // the descriptor→backend contract in one file.
-func (b *piBackend) applyBuiltinRuntimeOverrides(desc BuiltinRuntime) {
+//
+// It returns an error rather than absorbing an unknown SessionDialect: a
+// descriptor that names a dialect this backend does not implement would
+// otherwise launch the runtime under the family's own session flags, which is
+// the exact failure the field exists to prevent.
+func (b *piBackend) applyBuiltinRuntimeOverrides(desc BuiltinRuntime) error {
+	dialect, err := piSessionDialectByName(desc.SessionDialect)
+	if err != nil {
+		return err
+	}
 	b.defaultExecutable = desc.DefaultExecutable
 	b.providerLabel = desc.ProviderLabel
+	b.sessionDialect = dialect
+	return nil
 }
 
 // ResolveBackend is the single production entry point the daemon uses to
@@ -182,6 +233,8 @@ func NewRuntime(runtimeID string, cfg Config) (Backend, error) {
 	if !ok {
 		return nil, fmt.Errorf("runtime %q: protocol family %q backend %T does not support runtime overrides", runtimeID, desc.ProtocolFamily, backend)
 	}
-	applicator.applyBuiltinRuntimeOverrides(desc)
+	if err := applicator.applyBuiltinRuntimeOverrides(desc); err != nil {
+		return nil, fmt.Errorf("runtime %q (family %q): %w", runtimeID, desc.ProtocolFamily, err)
+	}
 	return backend, nil
 }
