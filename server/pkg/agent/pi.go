@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,6 +34,18 @@ type piBackend struct {
 	// strings ("pi" or "omp"). Defaults to "pi" when empty so existing callers
 	// that construct piBackend directly (tests) keep their original output.
 	providerLabel string
+	// sessionDialect is the session command-line contract of this runtime's
+	// CLI (see pi_session.go). Nil means the pi dialect, so a piBackend built
+	// directly — by New("pi") or by a test — behaves exactly as before.
+	sessionDialect piSessionDialect
+}
+
+// dialect returns the backend's session dialect, defaulting to pi's.
+func (b *piBackend) dialect() piSessionDialect {
+	if b.sessionDialect == nil {
+		return piDialect{}
+	}
+	return b.sessionDialect
 }
 
 var (
@@ -213,34 +226,46 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 
 	timeout := opts.Timeout
 
-	// Pi's --session flag expects a file path where events are appended.
-	// The path doubles as our opaque session identifier: we return it as
-	// SessionID and expect it back as ResumeSessionID on the next turn.
-	sessionPath := opts.ResumeSessionID
-	if sessionPath == "" {
-		p, err := newPiSessionPath()
-		if err != nil {
-			return nil, fmt.Errorf("%s session path: %w", label, err)
-		}
-		sessionPath = p
+	// How the session is named on the command line is the one part of the Pi
+	// protocol family its members do not agree on, so the dialect owns it:
+	// pi/omp take a transcript path the daemon creates and passes as
+	// `--session <file>`, Prime Agent has no such flag and selects a session
+	// with `--session-dir` + `--resume`. Everything after this — prompt
+	// delivery, event decoding, cancellation, usage, stderr — is shared.
+	dialect := b.dialect()
+	launch, err := dialect.prepare(opts.ResumeSessionID)
+	if errors.Is(err, errPiResumeTranscriptUnusable) {
+		// The transcript this turn was told to continue cannot be handed to
+		// the CLI. Report it as a refused resume so the daemon starts a fresh
+		// session, rather than failing the task or inventing a transcript.
+		return piResumeUnusableResult(label, opts.ResumeSessionID), nil
 	}
-	if err := ensurePiSessionFile(sessionPath); err != nil {
-		return nil, fmt.Errorf("%s session file: %w", label, err)
-	}
-	sessionLock, locked, err := tryLockPiSessionFile(sessionPath)
 	if err != nil {
-		return nil, fmt.Errorf("%s session lock: %w", label, err)
+		return nil, fmt.Errorf("%s %s: %w", label, dialect.name(), err)
 	}
-	if !locked {
-		if opts.ResumeSessionID != "" {
-			return piSessionBusyResult(label, sessionPath), nil
+
+	// Only a dialect that addresses the session by path has something to lock
+	// here. When the CLI picks the filename itself there is no path to claim
+	// before launch; a fresh launch gets a directory of its own instead, so
+	// two runs cannot collide over one transcript.
+	var sessionLock *os.File
+	if launch.file != "" {
+		lock, locked, err := tryLockPiSessionFile(launch.file)
+		if err != nil {
+			return nil, fmt.Errorf("%s session lock: %w", label, err)
 		}
-		return nil, fmt.Errorf("%s session file %q is already in use", label, sessionPath)
+		if !locked {
+			if launch.resuming {
+				return piSessionBusyResult(label, launch.file), nil
+			}
+			return nil, fmt.Errorf("%s session file %q is already in use", label, launch.file)
+		}
+		sessionLock = lock
 	}
 
 	runCtx, cancel := runContext(ctx, timeout)
 
-	args := buildPiArgs(sessionPath, opts, b.cfg.Logger)
+	args := buildPiArgsForLaunch(dialect, launch, opts, b.cfg.Logger)
 	cmd, _, _ := b.cfg.commandAt(execName).execVia(runCtx, choosePiInvocation, lookedUp, args, b.cfg.Logger)
 	hideAgentWindow(cmd)
 	b.cfg.logAgentCommand(cmd, newAgentCommandLogArgs(args))
@@ -272,7 +297,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	// Watch stderr as well as log it. When Pi refuses a resume it exits before
 	// emitting a single JSON event, so stderr is the only place the reason
 	// exists and Result.ResumeRejected has nothing else to be built from.
-	stderrWatch := newPiStderrWatcher(newLogWriter(b.cfg.Logger, "["+label+":stderr] "))
+	stderrWatch := newPiStderrWatcher(newLogWriter(b.cfg.Logger, "["+label+":stderr] "), dialect.resumeRefusalMarkers())
 	cmd.Stderr = stderrWatch
 
 	if err := startOwnedProcessTree(cmd, b.cfg.Logger); err != nil {
@@ -318,6 +343,12 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 		var finalError string
 		var lastTurnError string
 		usage := make(map[string]TokenUsage)
+		// observed carries the CLI's own account of which session it ran in.
+		var observed piObservedSession
+		// sawEvent separates "the protocol ran and something went wrong" from
+		// "the process never spoke the protocol at all". Only the second case
+		// has nothing but stderr to explain itself.
+		sawEvent := false
 
 		// Pi message_update events can be large (they embed the full message
 		// partial on each delta); the shared stream bound covers that.
@@ -333,8 +364,19 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 			if err := json.Unmarshal([]byte(line), &evt); err != nil {
 				continue
 			}
+			if evt.Type != "" {
+				sawEvent = true
+			}
 
 			switch evt.Type {
+			case piSessionHeaderEvent:
+				// Only a dialect whose CLI emits this header reads it. For the
+				// others the arm is unreachable, which keeps the recorded
+				// session identity exactly as it was.
+				if dialect.readsSessionHeader() && observed.headerID == "" {
+					observed.headerID = evt.ID
+				}
+
 			case "agent_start":
 				trySend(msgCh, Message{Type: MessageStatus, Status: "running"})
 
@@ -460,6 +502,14 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 			// composite).
 			if lastTurnError != "" {
 				finalError = fmt.Sprintf("%s; %s exited with error: %v", lastTurnError, label, waitErr)
+			} else if detail := stderrWatch.startupDiagnostic(); !sawEvent && detail != "" {
+				// The process exited without emitting a single event, so it
+				// failed before the protocol started and stderr is the only
+				// description of why. Keeping it out of the result is what
+				// made an unsupported-flag exit read as a bare
+				// "exited with error: exit status 1" in the run record, with
+				// the actual cause only in the daemon's debug log.
+				finalError = fmt.Sprintf("%s exited with error: %v: %s", label, waitErr, detail)
 			} else {
 				finalError = fmt.Sprintf("%s exited with error: %v", label, waitErr)
 			}
@@ -476,6 +526,19 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 
 		b.cfg.Logger.Info(label+" finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
 
+		publishedSessionID := dialect.sessionID(launch, observed)
+		// A dialect whose CLI names its own transcript can finish a run with
+		// no identity to publish: the CLI wrote nothing identifiable where it
+		// was told to write. The next turn then starts over, so say so here
+		// rather than letting multi-turn continuity disappear quietly.
+		if launch.file == "" && publishedSessionID == "" {
+			b.cfg.Logger.Warn(label+" published no session id; the next turn will start a new conversation",
+				"dialect", dialect.name(),
+				"session_dir", launch.dir,
+				"reported_session_id", observed.headerID,
+			)
+		}
+
 		// Publish the terminal result only after the transcript is available to
 		// a follow-up run. The result channel is buffered, so relying on a defer
 		// would let the receiver race ahead and spuriously treat the session as
@@ -487,13 +550,18 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 			Output:     output.String(),
 			Error:      finalError,
 			DurationMs: duration.Milliseconds(),
-			SessionID:  sessionPath,
-			Usage:      usage,
+			// The dialect decides what the published identity is, because only
+			// it knows whether the daemon named the transcript or the CLI did.
+			// An empty id means "no session to continue": the next turn starts
+			// fresh, which loses history but never resumes the wrong
+			// conversation.
+			SessionID: publishedSessionID,
+			Usage:     usage,
 			// Only a run that asked to resume can have had a resume refused.
 			// On a cold run the phrase cannot appear anyway, but stating the
 			// precondition keeps this honest against Result.ResumeRejected's
-			// contract rather than relying on Pi never saying it.
-			ResumeRejected: opts.ResumeSessionID != "" && stderrWatch.resumeRefused(),
+			// contract rather than relying on the CLI never saying it.
+			ResumeRejected: launch.resuming && stderrWatch.resumeRefused(),
 		}
 	}()
 
@@ -543,13 +611,23 @@ const piStderrTailLimit = 8 << 10
 // the buffer is mutex-guarded rather than relying on that ordering.
 type piStderrWatcher struct {
 	log io.Writer
+	// refusalMarkers are the dialect's resume-refusal phrases. Empty means
+	// the pi marker, so a watcher built without them keeps the old behaviour.
+	refusalMarkers []string
 
 	mu   sync.Mutex
 	tail []byte
 }
 
-func newPiStderrWatcher(log io.Writer) *piStderrWatcher {
-	return &piStderrWatcher{log: log}
+func newPiStderrWatcher(log io.Writer, refusalMarkers ...[]string) *piStderrWatcher {
+	w := &piStderrWatcher{log: log}
+	for _, markers := range refusalMarkers {
+		w.refusalMarkers = append(w.refusalMarkers, markers...)
+	}
+	if len(w.refusalMarkers) == 0 {
+		w.refusalMarkers = []string{piResumeRefusedMarker}
+	}
+	return w
 }
 
 func (w *piStderrWatcher) Write(p []byte) (int, error) {
@@ -568,7 +646,72 @@ func (w *piStderrWatcher) Write(p []byte) (int, error) {
 func (w *piStderrWatcher) resumeRefused() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return bytes.Contains(w.tail, []byte(piResumeRefusedMarker))
+	for _, marker := range w.refusalMarkers {
+		if bytes.Contains(w.tail, []byte(marker)) {
+			return true
+		}
+	}
+	return false
+}
+
+// piStartupDiagnosticLines is how many trailing stderr lines a startup failure
+// contributes to the result. A CLI that rejects its own command line says so
+// in one or two lines; more than this is a log, not a diagnosis.
+const piStartupDiagnosticLines = 3
+
+// piStartupDiagnosticLimit bounds the diagnostic's length. The result error is
+// stored per run and rendered in the UI, so it must stay a sentence rather
+// than grow into a transcript.
+const piStartupDiagnosticLimit = 512
+
+// startupDiagnostic renders the retained stderr tail as a one-line cause for
+// a process that exited before emitting any event.
+//
+// It is only ever called on that path. Once the CLI has spoken the protocol
+// the stream carries the structured error, which is both better and already
+// used — appending stderr there would double-report every provider message.
+func (w *piStderrWatcher) startupDiagnostic() string {
+	w.mu.Lock()
+	tail := string(w.tail)
+	w.mu.Unlock()
+
+	lines := make([]string, 0, piStartupDiagnosticLines)
+	for _, line := range strings.Split(tail, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	if len(lines) > piStartupDiagnosticLines {
+		lines = lines[len(lines)-piStartupDiagnosticLines:]
+	}
+	detail := strings.Join(lines, "; ")
+	if len(detail) > piStartupDiagnosticLimit {
+		detail = detail[:piStartupDiagnosticLimit] + "…"
+	}
+	return detail
+}
+
+// piResumeUnusableResult reports a resume the dialect declined to attempt:
+// the transcript Multica recorded is gone or empty, so there is no
+// conversation to continue. ResumeRejected is the daemon's cue to retry on a
+// fresh session, which is the only thing that can cure it.
+func piResumeUnusableResult(label, sessionID string) *Session {
+	msgCh := make(chan Message)
+	close(msgCh)
+	resCh := make(chan Result, 1)
+	resCh <- Result{
+		Status: "failed",
+		Error:  fmt.Sprintf("%s session %q has no resumable transcript", label, sessionID),
+		// The id is deliberately not republished: it named a transcript that
+		// cannot be resumed, and handing it back would serve the same dead
+		// pointer to the next claim.
+		ResumeRejected: true,
+	}
+	close(resCh)
+	return &Session{Messages: msgCh, Result: resCh}
 }
 
 // ── Pi event types ──
@@ -577,8 +720,18 @@ func (w *piStderrWatcher) resumeRefused() bool {
 // stream. Fields that can be either string or object across event types
 // (e.g. `message`, `result`) are held as json.RawMessage and decoded on
 // demand by the switch arms.
+// piSessionHeaderEvent is the event type a dialect's CLI uses to announce the
+// session it is writing. Prime Agent prints it as the first stdout line in
+// json mode (print_runtime.rs session_header_json); pi and omp never emit it,
+// so the arm that reads it is unreachable for them.
+const piSessionHeaderEvent = "session"
+
 type piStreamEvent struct {
 	Type string `json:"type"`
+
+	// session: the CLI's own identity for the transcript of this run. No
+	// other event in the family carries a top-level `id`.
+	ID string `json:"id,omitempty"`
 
 	// message_update
 	AssistantMessageEvent *piAssistantMessageEvent `json:"assistantMessageEvent,omitempty"`
@@ -740,14 +893,26 @@ var piCustomArgModes = map[string]blockedArgMode{
 // The prompt is deliberately absent from argv. Pi reads a non-TTY stdin in
 // print/JSON mode; using that supported path prevents Windows PowerShell's npm
 // shim from re-tokenising prompt content into options.
+// buildPiArgs assembles the argv for a one-shot invocation in the pi dialect —
+// the daemon-owned transcript path passed as `--session <file>`.
 func buildPiArgs(sessionPath string, opts ExecOptions, logger *slog.Logger) []string {
+	return buildPiArgsForLaunch(piDialect{}, piSessionLaunch{file: sessionPath}, opts, logger)
+}
+
+// buildPiArgsForLaunch assembles the argv for a one-shot invocation under a
+// given session dialect. Only the session-selection flags and the custom_args
+// blocklist come from the dialect; the protocol flags, the model selector and
+// the deliberate absence of the prompt from argv are family-wide.
+func buildPiArgsForLaunch(dialect piSessionDialect, launch piSessionLaunch, opts ExecOptions, logger *slog.Logger) []string {
 	args := []string{
 		"-p",
 		"--mode", "json",
 	}
-	if sessionPath != "" {
-		args = append(args, "--session", sessionPath)
-	}
+	// The session flags go here, immediately after `-p`, and never last.
+	// `-p` takes an optional positional message, so a token that does not
+	// start with `-` directly after it would be read as the prompt — which is
+	// also why `--mode json` stays pinned in front of everything variable.
+	args = append(args, dialect.args(launch)...)
 	// The selector goes to --model whole, and --provider is never synthesized.
 	// Pi's own resolver already accepts every shape we hold: a canonical
 	// `provider/id`, a bare id, and — crucially — an id that itself contains a
@@ -774,7 +939,7 @@ func buildPiArgs(sessionPath string, opts ExecOptions, logger *slog.Logger) []st
 	// Pi loads the per-task AGENTS.md the daemon writes into the workdir, so
 	// inlining the same runtime brief would duplicate it on every turn.
 	// Verified against Pi 0.67.2 (MUL-5392).
-	args = append(args, filterPiCustomArgs(opts.CustomArgs, logger)...)
+	args = append(args, filterPiCustomArgs(opts.CustomArgs, dialect.customArgBlocklist(), logger)...)
 	return args
 }
 
@@ -783,8 +948,8 @@ func buildPiArgs(sessionPath string, opts ExecOptions, logger *slog.Logger) []st
 // first positional message to stdin with no separator. Keeping those tokens
 // would silently mutate or replace the task prompt. Option values remain
 // supported, including values for extension-provided --long flags.
-func filterPiCustomArgs(args []string, logger *slog.Logger) []string {
-	args = filterCustomArgs(args, piBlockedArgs, logger)
+func filterPiCustomArgs(args []string, blocked map[string]blockedArgMode, logger *slog.Logger) []string {
+	args = filterCustomArgs(args, blocked, logger)
 	filtered := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
